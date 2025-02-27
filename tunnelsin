@@ -1,0 +1,113 @@
+#!/usr/bin/env bash
+
+declare -A SERVEO_PIDS
+declare -A SERVEO_URLS
+declare -A CLOUDFLARED_URLS
+declare -A CLOUDFLARED_PIDS
+
+setup_cloudflared_tunnel() {
+  local port=$1
+  local output_file="cloudflared_${port}_output.txt"
+
+  cloudflared tunnel --url http://localhost:${port} >${output_file} 2>&1 &
+  CLOUDFLARED_PIDS[$port]=$!
+
+  for i in {1..10}; do
+    if grep -q "Your quick Tunnel has been created!" ${output_file}; then
+      break
+    fi
+    sleep 1
+  done
+
+  CLOUDFLARED_URLS[$port]=$(grep -o 'https://[^ ]*\.trycloudflare\.com' ${output_file} | head -1)
+
+  if [ -z "${CLOUDFLARED_URLS[$port]}" ]; then
+    echo "Error: Failed to get Cloudflared URL. Check ${output_file} for details."
+    exit 1
+  fi
+}
+
+setup_serveo_tunnel() {
+  local port=$1
+  local output_file="serveo_${port}_output.txt"
+
+  ssh -R 80:localhost:${port} serveo.net >${output_file} 2>&1 &
+  SERVEO_PIDS[$port]=$!
+
+  for i in {1..10}; do
+    if grep -q "Forwarding HTTP traffic from" ${output_file}; then
+      break
+    fi
+    sleep 1
+  done
+
+  SERVEO_URLS[$port]=$(grep -o 'https://[^ ]*\.serveo\.net' serveo_output.txt | head -1)
+
+  if [ -z "${SERVEO_URLS[$port]}" ]; then
+    echo "Error: Failed to get Serveo URL. Check ${output_file} for details."
+    exit 1
+  fi
+}
+
+setup_all_tunnels() {
+  local tunnel_service=$1
+  shift
+  echo "Setting up Tunnels..."
+  for port in "$@"; do
+    if [[ "$tunnel_service" == "cloudflared" ]]; then
+      setup_cloudflared_tunnel "$port"
+    elif [[ "$tunnel_service" == "serveo" ]]; then
+      setup_serveo_tunnel "$port"
+    fi
+  done
+}
+
+show_tunnel_info() {
+  local -n urls=$2
+  if [[ -n ""${!urls[@]} ]]; then
+    echo "$1 tunnels:"
+    for port in "${!urls[@]}"; do
+      echo "- Port ${port}: ${urls[$port]}"
+    done
+
+    echo ""
+  fi
+}
+
+show_tunnels_info() {
+  echo ""
+  echo "====== TUNNELS INFORMATION ======"
+  show_tunnel_info "Serveo" SERVEO_URLS
+  show_tunnel_info "Cloudflared" CLOUDFLARED_URLS
+  echo "================================="
+}
+
+kill_tunnels_of() {
+  local -n tunnels=$1
+
+  for port in "${!tunnels[@]}"; do
+    echo "Stopping tunnel for port ${port}..."
+    kill ${tunnels[$port]} 2>/dev/null
+    unset tunnels[$port]
+    rm -f "serveo_${port}_output.txt"
+    rm -f "cloudflared_${port}_output.txt"
+  done
+}
+
+cleanup() {
+  echo "Cleaning up..."
+
+  kill_tunnels_of SERVEO_PIDS
+  kill_tunnels_of CLOUDFLARED_PIDS
+
+  echo "Done. Exiting."
+}
+
+trap cleanup EXIT
+
+setup_all_tunnels $@
+show_tunnels_info
+
+while true; do
+  sleep 60
+done
